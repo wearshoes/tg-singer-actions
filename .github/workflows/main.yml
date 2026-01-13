@@ -1,7 +1,10 @@
 on:
   schedule:
-    - cron: '30 10 * * *'
+    - cron: '30 02 * * *'
   workflow_dispatch:
+permissions:
+  actions: write
+  contents: read
 jobs:
   sign-job:
     name: sign-job-name
@@ -25,3 +28,13 @@ jobs:
             echo "$value_json" | jq . > "$config_name"
             tg-signer --session-string "$SESSION_STRING" run-once ${key}
         done
+    - name: 拉取代码
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: true
+    - name: 自动续命Actions(防止60天禁用action)
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git commit --allow-empty -m "auto keep actions alive (no code change)"
+        git push origin main
