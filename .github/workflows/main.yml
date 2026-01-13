@@ -4,11 +4,13 @@ on:
   workflow_dispatch:
 permissions:
   actions: write
-  contents: read
+  contents: write
 jobs:
   sign-job:
     name: sign-job-name
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
     - uses: actions/setup-python@v6
       with:
@@ -26,12 +28,14 @@ jobs:
             mkdir -p ${task_path}
             config_name="${task_path}/config.json"
             echo "$value_json" | jq . > "$config_name"
-            tg-signer --session-string "$SESSION_STRING" run-once ${key}
+            # 避免隐私信息输出，若想输出日志则删除 `>> /dev/null`
+            tg-signer --session-string "$SESSION_STRING" run-once ${key} >> /dev/null
         done
     - name: 拉取代码
       uses: actions/checkout@v4
       with:
         persist-credentials: true
+        fetch-depth: 0
     - name: 自动续命Actions(防止60天禁用action)
       run: |
         git config --global user.name "github-actions[bot]"
