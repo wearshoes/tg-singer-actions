@@ -67,7 +67,7 @@ jobs:
             --log-level warn \
             --session-string "$SESSION_STRING" \
             run-once \
-            --num-of-dialogs 100 \
+            --num-of-dialogs 500 \
             "$key" >"$task_log" 2>&1 || signer_status=$?
 
           swallowed_rpc_failure=0
@@ -83,7 +83,7 @@ jobs:
             )"
 
             if grep -Eq 'PeerIdInvalid|PEER_ID_INVALID' "$task_log"; then
-              failure_reason="Telegram peer is unavailable in the 100 most recent dialogs"
+              failure_reason="Telegram peer is unavailable in the 500 most recent dialogs"
             elif grep -Eq 'Unauthorized|AUTH_KEY_|SESSION_' "$task_log"; then
               failure_reason="Telegram session authorization failed"
             elif (( swallowed_rpc_failure != 0 )); then
