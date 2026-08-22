@@ -2,6 +2,9 @@ on:
   schedule:
     - cron: '30 1,6 * * *'
   workflow_dispatch:
+concurrency:
+  group: tg-signer-${{ github.repository }}
+  cancel-in-progress: false
 permissions:
   actions: write
   contents: write
@@ -17,20 +20,93 @@ jobs:
         python-version: '3.13'
     - name: install tg-signer
       run: |
-        pip3 install tg-signer
+        python -m pip install "tg-signer==0.8.6" "kurigram==2.2.24"
+        python -m pip check
+        tg-signer version
+        python -c "import pyrogram; print(f'Kurigram {pyrogram.__version__}')"
     - name: sign
       env:
         SESSION_STRING: ${{ secrets.SESSION_STRING }}
         TASK_MAP: ${{ secrets.TASK_MAP }}
       run: |
-        echo "$TASK_MAP" | jq -r 'to_entries[] | "\(.key)\t\(.value | tojson)"' | while IFS=$'\t' read -r key value_json; do
-            task_path=".signer/signs/${key}"
-            mkdir -p ${task_path}
-            config_name="${task_path}/config.json"
-            echo "$value_json" | jq . > "$config_name"
-            # 避免隐私信息输出，若想输出日志则删除 `> /dev/null 2>&1`
-            tg-signer --session-string "$SESSION_STRING" run-once ${key} > /dev/null 2>&1
-        done
+        set -uo pipefail
+
+        if [[ -z "${SESSION_STRING:-}" ]]; then
+          echo "::error title=Invalid Telegram configuration::SESSION_STRING is empty"
+          exit 1
+        fi
+
+        if ! jq -e 'type == "object" and length > 0 and all(.[]; type == "object")' \
+          >/dev/null <<< "${TASK_MAP:-}"; then
+          echo "::error title=Invalid Telegram configuration::TASK_MAP must be a non-empty JSON object"
+          exit 1
+        fi
+
+        failures=0
+        task_index=0
+
+        while IFS= read -r task_entry; do
+          task_index=$((task_index + 1))
+          key="$(jq -r '.key' <<< "$task_entry")"
+          value_json="$(jq -c '.value' <<< "$task_entry")"
+
+          if [[ -z "$key" || "$key" == "." || "$key" == ".." || "$key" == */* || "$key" == *\\* ]]; then
+            echo "::error title=Invalid Telegram task::Task #${task_index} has an invalid name"
+            failures=$((failures + 1))
+            continue
+          fi
+
+          task_path=".signer/signs/${key}"
+          config_name="${task_path}/config.json"
+          mkdir -p -- "$task_path"
+          printf '%s\n' "$value_json" | jq . > "$config_name"
+
+          task_log="$(mktemp)"
+          signer_status=0
+          tg-signer \
+            --log-level warn \
+            --session-string "$SESSION_STRING" \
+            run-once \
+            --num-of-dialogs 100 \
+            "$key" >"$task_log" 2>&1 || signer_status=$?
+
+          swallowed_rpc_failure=0
+          if grep -Fq 'Traceback (most recent call last):' "$task_log"; then
+            swallowed_rpc_failure=1
+          fi
+
+          if (( signer_status != 0 || swallowed_rpc_failure != 0 )); then
+            failure_type="$(
+              grep -Eo \
+                'PeerIdInvalid|PEER_ID_INVALID|Unauthorized|AUTH_KEY_[A-Z_]+|SESSION_[A-Z_]+|[A-Za-z_][A-Za-z0-9_.]*(Error|Exception)' \
+                "$task_log" | tail -n 1 || true
+            )"
+
+            if grep -Eq 'PeerIdInvalid|PEER_ID_INVALID' "$task_log"; then
+              failure_reason="Telegram peer is unavailable in the 100 most recent dialogs"
+            elif grep -Eq 'Unauthorized|AUTH_KEY_|SESSION_' "$task_log"; then
+              failure_reason="Telegram session authorization failed"
+            elif (( swallowed_rpc_failure != 0 )); then
+              failure_reason="tg-signer reported a Telegram RPC failure"
+            else
+              failure_reason="tg-signer exited with status ${signer_status}"
+            fi
+
+            echo "::error title=Telegram sign task failed::Task #${task_index}: ${failure_reason}; type=${failure_type:-unknown}"
+            failures=$((failures + 1))
+          else
+            echo "Task #${task_index} completed without detected errors"
+          fi
+
+          rm -f -- "$task_log"
+        done < <(jq -c 'to_entries[]' <<< "$TASK_MAP")
+
+        if (( failures > 0 )); then
+          echo "::error title=Telegram sign summary::${failures} of ${task_index} task(s) failed"
+          exit 1
+        fi
+
+        echo "All ${task_index} Telegram sign task(s) completed"
     - name: 拉取代码
       uses: actions/checkout@v4
       with:
